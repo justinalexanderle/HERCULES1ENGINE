@@ -1,0 +1,213 @@
+#include <Bounce2.h>
+#include <LiquidCrystal.h>
+
+// Define LCD pin connections
+LiquidCrystal lcd(A0, A1, A2, A3, A4, A5); 
+
+//call functions
+void runDepressSequence();
+void runLaunchSequence();
+void runPrimeSequence();
+void runStandbySequence();
+void runAbortSequence();
+void printToLCD();
+
+//create designations for sequence buttons
+const int buttonDepressPin = 2;    
+const int buttonLaunchPin = 3;     
+const int buttonPrimePin = 4;     
+const int buttonStandbyPin = 5;     
+const int buttonAbortPin = 6;      
+
+//create designations for servo commands (in this case LED)
+const int nitrogenPin = 7;      
+const int depressPin = 8;     
+const int chamberPin = 9; 
+const int igniterPin = 10;  
+
+//create bounce objects for buttons
+Bounce buttonDepress = Bounce();
+Bounce buttonLaunch = Bounce();
+Bounce buttonPrime = Bounce();
+Bounce buttonStandby = Bounce();
+Bounce buttonAbort = Bounce();
+
+void setup() {
+  Serial.begin(9600);
+
+  //begin LCD
+  lcd.begin(16, 2);
+  printToLCD("Online");
+
+  //use internal pull-up resistors
+  pinMode(buttonDepressPin, INPUT_PULLUP); 
+  pinMode(buttonLaunchPin, INPUT_PULLUP); 
+  pinMode(buttonPrimePin, INPUT_PULLUP);  
+  pinMode(buttonStandbyPin, INPUT_PULLUP); 
+  pinMode(buttonAbortPin, INPUT_PULLUP);  
+
+  // Attach buttons to Bounce objects
+  buttonDepress.attach(buttonDepressPin);
+  buttonLaunch.attach(buttonLaunchPin);
+  buttonPrime.attach(buttonPrimePin);
+  buttonStandby.attach(buttonStandbyPin);
+  buttonAbort.attach(buttonAbortPin);
+ 
+  //initialize LED pins
+  pinMode(nitrogenPin, OUTPUT);
+  pinMode(depressPin, OUTPUT);
+  pinMode(chamberPin, OUTPUT);
+
+  digitalWrite(nitrogenPin, LOW);
+  digitalWrite(depressPin, LOW);
+  digitalWrite(chamberPin, LOW);
+}
+
+void loop() {
+
+  // Update all button states
+  buttonDepress.update();
+  buttonLaunch.update();
+  buttonPrime.update();
+  buttonStandby.update();
+  buttonAbort.update();
+
+  // Check for button press (LOW means pressed due to pull-up)
+  if (buttonDepress.fell()) {
+    runDepressSequence();
+  }
+
+  if (buttonLaunch.fell()) {
+    runLaunchSequence();
+    delay(1000);
+    runStandbySequence();
+  }
+
+  if (buttonPrime.fell()) {
+    runPrimeSequence();
+  }
+
+  if (buttonStandby.fell()) {
+    runStandbySequence();
+  }
+
+  if (buttonAbort.fell()) {
+    runAbortSequence();
+  }
+
+}
+
+//function logic
+void runDepressSequence() {
+  printToLCD("Starting Depress");
+  digitalWrite(nitrogenPin, HIGH);
+  digitalWrite(depressPin, LOW);
+  delay(1000);
+  digitalWrite(chamberPin, HIGH);
+  printToLCD("Depress Complete");
+}
+
+void runLaunchSequence() {
+  printToLCD("Starting Launch Sequence");
+  delay(500);
+  countdownTimer(10);
+  delay(500);
+  printToLCD("Launching!");
+  digitalWrite(depressPin, HIGH);
+  delay(1000);
+  digitalWrite(chamberPin, LOW);
+  digitalWrite(igniterPin, HIGH);
+  countdownTimer(10);
+  digitalWrite(igniterPin, LOW);
+  printToLCD("Ending Launch Sequence");
+}
+
+void runStandbySequence() {
+  printToLCD("Starting Standby Sequence");
+
+  delay(1000);
+
+  printToLCD("Closing Valves...");
+  delay(500);
+  countdownTimer(5);
+  digitalWrite(nitrogenPin, HIGH);
+  digitalWrite(depressPin, HIGH);
+  digitalWrite(chamberPin, HIGH);
+  printToLCD("Standby");
+}
+
+void runPrimeSequence() {
+  printToLCD("Starting Prime Sequence");
+
+  delay(1000);
+
+  printToLCD("Closing Depress & Chamber Valves");
+
+  delay(500);
+
+  countdownTimer(5);
+  digitalWrite(chamberPin, HIGH);
+  digitalWrite(depressPin, HIGH);
+
+  printToLCD("Pressurizing System");
+
+  delay(3000);
+
+  digitalWrite(nitrogenPin, LOW);
+  countdownTimer(10);
+  digitalWrite(nitrogenPin, HIGH);
+  printToLCD("System Primed for Launch");
+}
+
+void runAbortSequence() {
+  printToLCD("ABORTING!");
+
+  delay(200);
+
+  digitalWrite(nitrogenPin, HIGH);
+  digitalWrite(depressPin, LOW);
+  printToLCD("Depress Valves Open...");
+
+  delay(3000);
+  printToLCD("Closing Chamber Valves...");
+  digitalWrite(chamberPin, HIGH);
+
+  delay(1000);
+
+  printToLCD("Launch Aborted, Begin Depress");
+}
+
+void countdownTimer(int seconds) {
+  for (int i = seconds; i > 0; i--) {
+    printToLCD("Countdown: ");
+    printToLCD(String(i));
+    delay(1000); // Wait 1 second
+  }
+}
+
+void printToLCD(String message) {
+  lcd.clear();  // Always clear before printing
+
+  // Trim or split the message for 2 lines
+  int len = message.length();
+
+  // Line 1
+  lcd.setCursor(0, 0);
+  for (int i = 0; i < 16 && i < len; i++) {
+    lcd.print(message[i]);
+  }
+
+  // Line 2
+  if (len > 16) {
+    lcd.setCursor(0, 1);
+    for (int i = 16; i < 32 && i < len; i++) {
+      lcd.print(message[i]);
+    }
+  }
+
+  // Optional: show truncation indicator
+  if (len > 32) {
+    lcd.setCursor(15, 1);
+    lcd.print('>');
+  }
+}
