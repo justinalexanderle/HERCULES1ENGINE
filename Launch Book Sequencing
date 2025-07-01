@@ -10,14 +10,15 @@ void runLaunchSequence();
 void runPrimeSequence();
 void runStandbySequence();
 void runAbortSequence();
-void printToLCD();
+void printToLCD(String message);
+void ISR_abort();
 
 //create designations for sequence buttons
-const int buttonDepressPin = 2;    
+const int buttonDepressPin = 6;    
 const int buttonLaunchPin = 3;     
 const int buttonPrimePin = 4;     
 const int buttonStandbyPin = 5;     
-const int buttonAbortPin = 6;      
+const int buttonAbortPin = 2;      
 
 //create designations for servo commands (in this case LED)
 const int nitrogenPin = 7;      
@@ -32,12 +33,20 @@ Bounce buttonPrime = Bounce();
 Bounce buttonStandby = Bounce();
 Bounce buttonAbort = Bounce();
 
+//creates abortFlag var
+volatile bool abortFlag = false;
+
 void setup() {
   Serial.begin(9600);
 
   //begin LCD
   lcd.begin(16, 2);
   printToLCD("Online");
+
+  //defines the abort function as an interrupt
+  attachInterrupt(digitalPinToInterrupt(2), ISR_abort, FALLING);
+
+
 
   //use internal pull-up resistors
   pinMode(buttonDepressPin, INPUT_PULLUP); 
@@ -79,8 +88,6 @@ void loop() {
 
   if (buttonLaunch.fell()) {
     runLaunchSequence();
-    delay(1000);
-    runStandbySequence();
   }
 
   if (buttonPrime.fell()) {
@@ -95,99 +102,139 @@ void loop() {
     runAbortSequence();
   }
 
+if (abortFlag) {
+    abortFlag = false;
+    runAbortSequence();
+    // After abort runs, do nothing else this loop iteration
+    return;
+  }
+
 }
 
 //function logic
 void runDepressSequence() {
   printToLCD("Starting Depress");
+ if (abortFlag) return;
+  countdownTimer(5);
+ if (abortFlag) return;
   digitalWrite(nitrogenPin, HIGH);
-  digitalWrite(depressPin, LOW);
-  delay(1000);
   digitalWrite(chamberPin, HIGH);
+ if (abortFlag) return;
+  printToLCD("Depressing After Delay");
+  if (abortFlag) return;
+  delay(5000);
+  if (abortFlag) return;
+  digitalWrite(depressPin, LOW);
   printToLCD("Depress Complete");
 }
 
 void runLaunchSequence() {
+   if (abortFlag) return;
   printToLCD("Starting Launch Sequence");
-  delay(500);
-  countdownTimer(10);
-  delay(500);
-  printToLCD("Launching!");
-  digitalWrite(depressPin, HIGH);
   delay(1000);
-  digitalWrite(chamberPin, LOW);
-  digitalWrite(igniterPin, HIGH);
+  digitalWrite(depressPin, HIGH);
+ if (abortFlag) return;
   countdownTimer(10);
+  if (abortFlag) return;
+  printToLCD("Launching!");
+  digitalWrite(igniterPin, HIGH);
+
+  delay(1000);
+ if (abortFlag) return;
+  digitalWrite(chamberPin, LOW);
+
+  countdownTimer(5);
+ if (abortFlag) return;
   digitalWrite(igniterPin, LOW);
+
   printToLCD("Ending Launch Sequence");
+ 
+  delay(1000);
+ if (abortFlag) return;
+  countdownTimer(5);
+ if (abortFlag) return;
+  digitalWrite(nitrogenPin, HIGH);
+  digitalWrite(depressPin, HIGH);
+  digitalWrite(chamberPin, HIGH);
+
+  printToLCD("Standby");
 }
 
 void runStandbySequence() {
   printToLCD("Starting Standby Sequence");
-
+ if (abortFlag) return;
   delay(1000);
-
-  printToLCD("Closing Valves...");
-  delay(500);
+ if (abortFlag) return;
+  printToLCD("Closing All Valves...");
+  delay(1000);
+  if (abortFlag) return;
   countdownTimer(5);
   digitalWrite(nitrogenPin, HIGH);
   digitalWrite(depressPin, HIGH);
   digitalWrite(chamberPin, HIGH);
+  digitalWrite(igniterPin, LOW);
   printToLCD("Standby");
+  if (abortFlag) return;
 }
 
 void runPrimeSequence() {
   printToLCD("Starting Prime Sequence");
-
+ if (abortFlag) return;
   delay(1000);
-
+if (abortFlag) return;
   printToLCD("Closing Depress & Chamber Valves");
-
-  delay(500);
-
+ 
+  delay(1000);
+if (abortFlag) return;
   countdownTimer(5);
   digitalWrite(chamberPin, HIGH);
   digitalWrite(depressPin, HIGH);
-
+  digitalWrite(igniterPin, LOW);
+if (abortFlag) return;
   printToLCD("Pressurizing System");
-
+ 
   delay(3000);
-
+if (abortFlag) return;
   digitalWrite(nitrogenPin, LOW);
   countdownTimer(10);
-  digitalWrite(nitrogenPin, HIGH);
+  if (abortFlag) return;
   printToLCD("System Primed for Launch");
 }
 
 void runAbortSequence() {
   printToLCD("ABORTING!");
 
-  delay(200);
-
-  digitalWrite(nitrogenPin, HIGH);
+  digitalWrite(igniterPin, LOW);
   digitalWrite(depressPin, LOW);
-  printToLCD("Depress Valves Open...");
 
-  delay(3000);
-  printToLCD("Closing Chamber Valves...");
+  delay(1000);
+
+  printToLCD("Closing Chamber Valves");
   digitalWrite(chamberPin, HIGH);
 
   delay(1000);
 
+  printToLCD("Closing N2 Valves");
+  countdownTimer(5);
+  digitalWrite(nitrogenPin, HIGH);
+
   printToLCD("Launch Aborted, Begin Depress");
+
+  return;
 }
 
 void countdownTimer(int seconds) {
   for (int i = seconds; i > 0; i--) {
     printToLCD("Countdown: ");
     printToLCD(String(i));
+     if (abortFlag) return;
     delay(1000); // Wait 1 second
   }
 }
 
 void printToLCD(String message) {
   lcd.clear();  // Always clear before printing
-
+ 
   // Trim or split the message for 2 lines
   int len = message.length();
 
@@ -210,4 +257,8 @@ void printToLCD(String message) {
     lcd.setCursor(15, 1);
     lcd.print('>');
   }
+}
+
+void ISR_abort() {
+  abortFlag = true;
 }
