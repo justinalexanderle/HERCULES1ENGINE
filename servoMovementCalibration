@@ -1,0 +1,77 @@
+#include <Servo.h>
+#include <Bounce2.h>
+
+Servo myServo;
+
+// Pins
+const int buttonForwardPin = 2;
+const int buttonBackwardPin = 3;
+
+// Debouncers
+Bounce buttonForwardDebouncer = Bounce();
+Bounce buttonBackwardDebouncer = Bounce();
+
+// Servo state
+int currentMicros = 75; //this number needs to be calibrated
+int targetMicros = 0;
+unsigned long moveStartTime = 0;
+unsigned long moveDuration = 0;
+bool moving = false;
+
+void setup() {
+  pinMode(buttonForwardPin, INPUT_PULLUP);
+  pinMode(buttonBackwardPin, INPUT_PULLUP);
+
+  buttonForwardDebouncer.attach(buttonForwardPin);
+  buttonForwardDebouncer.interval(25);
+
+  buttonBackwardDebouncer.attach(buttonBackwardPin);
+  buttonBackwardDebouncer.interval(25);
+
+  myServo.attach(9);
+  myServo.writeMicroseconds(currentMicros);  // Initialize to starting pulse
+}
+
+void loop() {
+  buttonForwardDebouncer.update();
+  buttonBackwardDebouncer.update();
+
+  if (buttonForwardDebouncer.fell() && !moving) {
+    startServoMove(1300, 100);  // Close, needs to be calibrated
+  }
+
+  if (buttonBackwardDebouncer.fell() && !moving) {
+    startServoMove(100, 100);  // Open, needs to be calibrated
+  }
+
+  if (moving) {
+    updateServoPosition();
+  }
+}
+
+//the following function logic will be used to move servos. the Rx needs to send a startServoMove(x, y) to servos
+void startServoMove(int newTargetMicros, unsigned long durationMillis) {
+  newTargetMicros = constrain(newTargetMicros, 0, 2400);  // Safe PWM range
+  targetMicros = newTargetMicros;
+  moveDuration = durationMillis;
+  moveStartTime = millis();
+  moving = true;
+}
+
+void updateServoPosition() {
+  unsigned long now = millis();
+  unsigned long elapsed = now - moveStartTime;
+
+  if (elapsed >= moveDuration) {
+    // Final move complete
+    myServo.writeMicroseconds(targetMicros);
+    currentMicros = targetMicros;
+    moving = false;
+    return;
+  }
+
+  // Interpolate toward the target
+  float progress = (float)elapsed / moveDuration;
+  int interpolated = currentMicros + (int)((targetMicros - currentMicros) * progress);
+  myServo.writeMicroseconds(interpolated);
+}
