@@ -1,25 +1,26 @@
 #include <SPI.h>
 #include <RH_RF95.h>
 #include <HX711.h>
+#include <Adafruit_SleepyDog.h>
 
 // macro for debugging, 0 for OFF, 1 for ON
-//macro for debugging
+// macro for debugging
 #define DEBUG 1
 
 #if DEBUG
-  #define DEBUG_PRINT(x)         Serial.print(x)
-  #define DEBUG_PRINTLN(x)       Serial.println(x)
-  #define DEBUG_PRINT_FLOAT(x,d) Serial.print(x, d)
-  #define DEBUG_PRINTLN_FLOAT(x,d) Serial.println(x, d)
-  #define DEBUG_PRINT_HEX(x)       Serial.print(x, HEX)
-  #define DEBUG_PRINTLN_HEX(x)     Serial.println(x, HEX)
+#define DEBUG_PRINT(x) Serial.print(x)
+#define DEBUG_PRINTLN(x) Serial.println(x)
+#define DEBUG_PRINT_FLOAT(x, d) Serial.print(x, d)
+#define DEBUG_PRINTLN_FLOAT(x, d) Serial.println(x, d)
+#define DEBUG_PRINT_HEX(x) Serial.print(x, HEX)
+#define DEBUG_PRINTLN_HEX(x) Serial.println(x, HEX)
 #else
-  #define DEBUG_PRINT(x)
-  #define DEBUG_PRINTLN(x)
-  #define DEBUG_PRINT_FLOAT(x,d)
-  #define DEBUG_PRINTLN_FLOAT(x,d)
-  #define DEBUG_PRINT_HEX(x)
-  #define DEBUG_PRINTLN_HEX(x)
+#define DEBUG_PRINT(x)
+#define DEBUG_PRINTLN(x)
+#define DEBUG_PRINT_FLOAT(x, d)
+#define DEBUG_PRINTLN_FLOAT(x, d)
+#define DEBUG_PRINT_HEX(x)
+#define DEBUG_PRINTLN_HEX(x)
 #endif
 
 // for Feather M0 Lora:
@@ -30,8 +31,8 @@
 RH_RF95 rf95(RFM95_CS, RFM95_INT);  // Singleton instance of the radio driver
 
 // for HX711
-#define DAT 12
-#define CLK 11
+#define DAT 5
+#define CLK 21  //SCL
 HX711 scale;
 
 // for pressure transducers
@@ -41,21 +42,32 @@ HX711 scale;
 #define pt4 A3
 #define pt5 A4
 #define pt6 A5
+#define pt7 0  // Rx
+
+unsigned long lastRadioMessageTime;
 
 uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
 uint8_t len = sizeof(buf);
 
+uint8_t dataACKaddress = 0x90;
+
+uint8_t servocommandaddress = 0xBA;
+
+uint8_t servoACKbuffer[3];
+uint8_t servoACKaddress = 0xA3;
+
 uint8_t weightaddress = 0x84;
-float calibration_factor = 4257.0;  // raw data / known weight
+float calibration_factor = (6300 - 5300) / 211.4;  // (raw weight data - raw zero data) / known weight
 float weight;
 
 uint8_t pressureaddress = 0xCE;
-const uint8_t numSensors = 6;
-uint8_t pressurepins[numSensors] = {pt1, pt2, pt3, pt4, pt5, pt6};
+const uint8_t numSensors = 7;
+uint8_t pressurepins[numSensors] = { pt1, pt2, pt3, pt4, pt5, pt6, pt7 };
 uint16_t rawpressures16[numSensors];
-uint8_t rawpressures8[12];
+uint8_t rawpressures8[numSensors * 2];
 
 void setup() {
+  setServoDefault();
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(RFM95_RST, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
@@ -98,80 +110,81 @@ void setup() {
   scale.tare();  // Reset scale to 0 with no load
   DEBUG_PRINTLN("Scale tared.");
   scale.set_scale(calibration_factor);  // raw data / known weight
-  delay(200);    // delay to make sure scale.is_ready is actually ready after calibration
+  delay(200);                           // delay to make sure scale.is_ready is actually ready after calibration
 
   // set ADC resolution (for pressure transducers)
   analogReadResolution(12);
+
+  int watchdogTimeout = Watchdog.enable(2000);  // 2 second hardware watchdog
+  lastRadioMessageTime = millis();
 }
 
 void loop() {
+
   ReadPackSendWeight();
   ReadPackSendPressure();
-  // testcommand();
-  
-  if (rf95.available()) {
+
+
+  if (millis() - lastRadioMessageTime > 2000) {  // 2 second radio watchdog
+    setServoDefault();
+    DEBUG_PRINTLN("RADIO WATCH");
+    NVIC_SystemReset();
+  }
+
+  Watchdog.reset();
+
+  if (rf95.waitAvailableTimeout(100)) {
+    // Should be a reply message for us now
+    uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
+    uint8_t len = sizeof(buf);
     if (rf95.recv(buf, &len)) {
-      //RH_RF95::printBuffer("Received: ", buf, len);
-      DEBUG_PRINT((char*)buf);
-      DEBUG_PRINTLN(" RECEIVED");
-      command_decoder();
-      sendACK();
-    }
-  }
-}
-
-// ACK can be a colored light(s) or something if we can't use serial because were printing data.
-void sendACK() {
-  DEBUG_PRINTLN("Sending ACK");
-  uint8_t radioack[17] = "Message Received";
-  radioack[16] = '\0';
-  rf95.send(radioack, sizeof(radioack));
-}
-
-void command_decoder() {
-  if (len != 16) {  // checking for size of message (should be 16 bytes)
-    DEBUG_PRINTLN("Wrong Message Length");
-    uint8_t radioerror[21] = "WRONG RECIPIENT-JCJL";
-    radioerror[20] = '\0';
-    rf95.send(radioerror, sizeof(radioerror));
-  }
-
-  // housekeeping for our received message (for commands)
-  if (len == 16) {           // checking for size of message (should be 16 bytes)
-    char main[len + 1];      // size of "radiopacket" full message (from tx)
-    memcpy(main, buf, len);  // copying all of (char*)buf into an array we can manipulate
-    main[len] = '\0';        // knowing size of our message is always 16, the 15th (last) index is manually set to null
-    DEBUG_PRINTLN(strlen(main));
-    DEBUG_PRINTLN(main);
-
-    char password[13];            // size of password HERCULESJCJL +null
-    strncpy(password, main, 12);  // copying only the first 12 chars into password
-    password[12] = '\0';
-    DEBUG_PRINTLN(password);
-
-    char launchcode[3];                               // size of launchcode [XX] +null
-    strncpy(launchcode, main + strlen(main) - 2, 2);  // copies the last 2 chars from main
-    launchcode[2] = '\0';
-    DEBUG_PRINTLN(launchcode);
-    int test = sizeof(launchcode);
-    DEBUG_PRINTLN(test);
-
-    // functions for if the message is what we're expecting
-    if (strcmp(password, "HERCULESJCJL") == 0) {  // addressing
-      DEBUG_PRINTLN("Good Password");
-
-      if (strcmp(launchcode, "01") == 0) {  // launch code 01
-        DEBUG_PRINTLN("launch code 01 good");
-        servocommand1();
+      for (int i = 0; i < len; i++) {
+        DEBUG_PRINT("Byte ");
+        DEBUG_PRINT(i);
+        DEBUG_PRINT(": ");
+        DEBUG_PRINTLN_HEX(buf[i]);
       }
-      if (strcmp(launchcode, "02") == 0) {  // launch code 01
-        DEBUG_PRINTLN("launch code 02 good");
-        servocommand2();
-      }
+      DEBUG_PRINTLN(len);
+      command_decoder(buf, len);
+      rec_dataACK(buf, len);
     } else {
-      DEBUG_PRINTLN("Bad Password or Launch Code");
+      DEBUG_PRINTLN("Receive failed");
+    }
+  } else {
+    DEBUG_PRINTLN("No reply received (timeout)");
+  }
+}
+
+// byte commands
+void command_decoder(uint8_t* buf, uint8_t len) {
+  DEBUG_PRINTLN("ENTERING DECODER");
+  DEBUG_PRINTLN(len);
+  if (len == 3) {
+    DEBUG_PRINTLN("good length command");
+    // Comparing addresses
+    uint8_t address = buf[0];
+    if (address != servocommandaddress) {
+      DEBUG_PRINT("unknown command address: 0x");
+      DEBUG_PRINTLN_HEX(address);
+      return;
+    }
+    // Comparing CRC
+    uint8_t recCRC = buf[2];
+    uint8_t calcCRC = computeCRC8(buf, 2);
+    if (recCRC != calcCRC) {
+      DEBUG_PRINTLN("bad command crc");
+      return;
+    }
+    lastRadioMessageTime = millis();
+    DEBUG_PRINTLN("RESET SERVO RADIODOG");
+    if (buf[1] == 1) {
+      servocommand1();
+    }
+    if (buf[1] == 2) {
+      servocommand2();
     }
   }
+  DEBUG_PRINTLN("EXITING DECODER");
 }
 
 // Reads, packs, and sends weight data
@@ -180,14 +193,13 @@ void ReadPackSendWeight() {
     weight = scale.get_units(10);  // Get weight, average of 10 readings
 
     // for testing
-    // DEBUG_PRINT("Weight: ");
+    DEBUG_PRINT("Weight: ");
     DEBUG_PRINTLN_FLOAT(weight, 2);
-    // DEBUG_PRINTLN(" g");
+    DEBUG_PRINTLN(" g");
     //
   } else {
     DEBUG_PRINTLN("HX711 not ready");
   }
-  delay(500);
 
   uint8_t weightbuffer[6];  //address + 4 bytes (float) + crc8 (null implied / not needed for binary data)
   memcpy(weightbuffer + 1, &weight, 4);
@@ -196,7 +208,6 @@ void ReadPackSendWeight() {
   weightbuffer[5] = weightcrc;
   rf95.send(weightbuffer, sizeof(weightbuffer));
   rf95.waitPacketSent();
-  delay(200);
 }
 
 // Pressure related functions
@@ -207,29 +218,20 @@ void ReadPackSendPressure() {
   for (uint8_t i = 0; i < numSensors; i++) {
     rawpressures16[i] = analogRead(pressurepins[i]);
   }
-  // DEBUG_PRINTLN("raw16: ");
-  // for (uint8_t i = 0; i < numSensors; i++) {
-  //   DEBUG_PRINT(rawpressures16[i]);
-  //   DEBUG_PRINT(",");
-  // }
-  // DEBUG_PRINTLN();
-  
-  uint8_t pressurebuffer[14];  // address + 6x2bytes (uint16_t) + CRC
+  uint8_t pressurebuffer[16];  // address + 7x2bytes (uint16_t) + CRC
   pressurebuffer[0] = pressureaddress;
 
-  for (int i = 0; i < numSensors; i++) { // big endian
-  rawpressures8[2 * i]     = (rawpressures16[i] >> 8) & 0xFF;  // High byte first
-  rawpressures8[2 * i + 1] = rawpressures16[i] & 0xFF;         // Low byte second
+  for (int i = 0; i < numSensors; i++) {                     // big endian
+    rawpressures8[2 * i] = (rawpressures16[i] >> 8) & 0xFF;  // High byte first
+    rawpressures8[2 * i + 1] = rawpressures16[i] & 0xFF;     // Low byte second
   }
-  for (uint8_t i = 0; i < numSensors*2; i++) {
+  for (uint8_t i = 0; i < numSensors * 2; i++) {
     pressurebuffer[1 + i] = rawpressures8[i];
   }
-  uint8_t pressurecrc = computeCRC8(pressurebuffer, 13);
-  // DEBUG_PRINT("crc: ");
-  // DEBUG_PRINTLN(pressurecrc);
-  pressurebuffer[13] = pressurecrc;
+  uint8_t pressurecrc = computeCRC8(pressurebuffer, 15);
+  pressurebuffer[15] = pressurecrc;
   DEBUG_PRINT("pressurebuffer: ");
-  for (uint8_t i = 0; i < 14; i++){
+  for (uint8_t i = 0; i < numSensors * 2; i++) {
     DEBUG_PRINT(pressurebuffer[i]);
     DEBUG_PRINT(",");
   }
@@ -241,23 +243,35 @@ void ReadPackSendPressure() {
   DEBUG_PRINTLN("test3");
   rf95.waitPacketSent();
   DEBUG_PRINTLN("test4");
-  delay(200);
 }
 
+//local command and send servo ACK
 void servocommand1() {
   // SERVO COMMANDS HERE
-  DEBUG_PRINTLN("Sending ACK");
-  uint8_t radioack[21] = "SERVOCOMMAND 01 GOOD";
-  radioack[20] = '\0';
-  rf95.send(radioack, sizeof(radioack));
+  digitalWrite(LED_BUILTIN, HIGH); // test LED standing in for servo response
+  DEBUG_PRINTLN("Sending servo 1 ACK");
+  uint8_t servoACKbuffer[3];
+  servoACKbuffer[0] = servoACKaddress;
+  servoACKbuffer[1] = 1;
+  servoACKbuffer[2] = computeCRC8(servoACKbuffer, 2);
+
+  // sending multiple acks so it actually catches
+  for (int i = 0; i < 10; i++){  
+    rf95.send(servoACKbuffer, sizeof(servoACKbuffer));
+    rf95.waitPacketSent();
+    delay(10);
+  }
 }
 
 void servocommand2() {
   // SERVO COMMANDS HERE
-  DEBUG_PRINTLN("Sending ACK");
-  uint8_t radioack[21] = "SERVOCOMMAND 02 GOOD";
-  radioack[20] = '\0';
-  rf95.send(radioack, sizeof(radioack));
+  DEBUG_PRINTLN("Sending servo 2 ACK");
+  uint8_t servoACKbuffer[3];
+  servoACKbuffer[0] = servoACKaddress;
+  servoACKbuffer[1] = 2;
+  servoACKbuffer[2] = computeCRC8(servoACKbuffer, 2);
+  rf95.send(servoACKbuffer, sizeof(servoACKbuffer));
+  rf95.waitPacketSent();
 }
 
 uint8_t computeCRC8(const uint8_t* data, size_t datalen) {
@@ -274,18 +288,29 @@ uint8_t computeCRC8(const uint8_t* data, size_t datalen) {
   return crc;
 }
 
-void testcommand (){
-  uint8_t dataToSend[14] = {0,2, 104, 0, 100, 0, 98, 0, 100, 0, 101, 0, 93,0};
-  dataToSend[0] = pressureaddress;
-  uint8_t datacrc = computeCRC8(dataToSend, 13);
-  dataToSend[13] = datacrc;
-  DEBUG_PRINTLN("Sending packet...");
-    for (uint8_t i = 0; i < 14; i++){
-    DEBUG_PRINT(dataToSend[i]);
-    DEBUG_PRINT(",");
+void setServoDefault() {
+  // this is critical because when the watchdog resets, this will get the servo valves to "abort" position.
+  // this will run everytime setup is called (and only once for a watchdog reset)
+}
+
+void rec_dataACK(uint8_t* buf, uint8_t len) {
+  DEBUG_PRINTLN(len);
+  if (len == 2) {
+    DEBUG_PRINTLN("GOOD LEN DATAACK");
+    uint8_t address = buf[0];
+    if (address != dataACKaddress) {
+      DEBUG_PRINT("unknown address ACK: 0x");
+      DEBUG_PRINTLN_HEX(address);
+      return;
+    }
+    uint8_t recCRC = buf[1];
+    uint8_t calcCRC = computeCRC8(buf, 1);
+    if (recCRC != calcCRC) {
+      DEBUG_PRINTLN("Bad ACK CRC");
+      return;
+    }
+    DEBUG_PRINTLN("reset radio watchdog");
+    lastRadioMessageTime = millis();
+    delay(30);
   }
-  rf95.send(dataToSend, sizeof(dataToSend));
-  
-  rf95.waitPacketSent();
-  DEBUG_PRINTLN("Packet sent!");
 }
